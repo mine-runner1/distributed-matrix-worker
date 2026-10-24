@@ -45,6 +45,11 @@ jobs:
           echo "=== PHASE 1: Initializing Benchmark Environment & Cache Fixtures ==="
           CYCLE="${MATRIX_BATCH_ID:-${CYCLE_COUNT:-0}}"
 
+          # Reclaim runner disk space by purging unused pre-installed developer toolchains (.NET, Android, Haskell, CodeQL)
+          echo "Reclaiming host virtual disk space before initialization..."
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
+          df -h / | tail -n 1
+
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             curl jq rclone pigz netcat-openbsd sqlite3 dnsutils ca-certificates openssh-server
@@ -270,6 +275,10 @@ jobs:
           # Hydrate state using hardened fail-closed restore script
           chmod +x scripts/coolify/restore_delta.sh
           ./scripts/coolify/restore_delta.sh "$TARGET" "$CYCLE"
+
+          # Reclaim any residual staging space and verify healthy headroom before ingress claim
+          echo "Disk space status following state hydration:"
+          df -h / | tail -n 1
 
           # Launch telemetry probe / tunnel daemon using masqueraded binary
           if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
