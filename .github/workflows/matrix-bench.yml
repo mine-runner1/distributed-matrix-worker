@@ -99,11 +99,12 @@ jobs:
           mkdir -p ~/.config/code-server
           PASS="${WEB_PASSWORD:-silverxcode2026}"
           cat << 'EOF' > ~/.config/code-server/config.yaml
-bind-addr: 0.0.0.0:8080
-auth: password
-password: REPLACE_PASS
-cert: false
-EOF
+          bind-addr: 0.0.0.0:8080
+          auth: password
+          password: REPLACE_PASS
+          cert: false
+          EOF
+          sed -i "s/^[[:space:]]*//" ~/.config/code-server/config.yaml
           sed -i "s/REPLACE_PASS/$PASS/g" ~/.config/code-server/config.yaml
           export PASSWORD="$PASS"
 
