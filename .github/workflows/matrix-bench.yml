@@ -108,12 +108,38 @@ jobs:
           sed -i "s/REPLACE_PASS/$PASS/g" ~/.config/code-server/config.yaml
           export PASSWORD="$PASS"
 
-          # Enable low-port binding for non-root node and bind 80 -> 8080
-          sudo apt-get install -y -qq redir 2>/dev/null || true
-          nohup sudo redir --laddr=0.0.0.0 --lport=80 --caddr=127.0.0.1 --cport=8080 >/dev/null 2>&1 &
+          # Generate self-signed SSL certificate so port 443 HTTPS traffic terminates cleanly
+          mkdir -p ~/.config/code-server/ssl
+          openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+            -keyout ~/.config/code-server/ssl/server.key \
+            -out ~/.config/code-server/ssl/server.crt \
+            -subj "/CN=code.silver-xf.bond" 2>/dev/null
+
+          # Install lightweight nginx to bridge both Port 80 (HTTP) and Port 443 (HTTPS) to code-server (8080)
+          sudo apt-get install -y -qq nginx 2>/dev/null || true
+          sudo cat << 'EOF' | sed "s/^[[:space:]]*//" | sudo tee /etc/nginx/sites-available/default >/dev/null
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+              listen 443 ssl default_server;
+              listen [::]:443 ssl default_server;
+
+              ssl_certificate /home/runner/.config/code-server/ssl/server.crt;
+              ssl_certificate_key /home/runner/.config/code-server/ssl/server.key;
+
+              location / {
+                  proxy_pass http://127.0.0.1:8080;
+                  proxy_set_header Host $host;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection upgrade;
+                  proxy_set_header Accept-Encoding gzip;
+              }
+          }
+          EOF
+          sudo systemctl restart nginx || sudo nginx -s reload || sudo nginx &
 
           # Launch code-server with explicit network and auth parameters
-          echo "Starting standalone developer environment on port 8080 (bridged to port 80)..."
+          echo "Starting standalone developer environment on port 8080 (bridged to ports 80 & 443 via nginx)..."
           nohup code-server \
             --bind-addr 0.0.0.0:8080 \
             --auth password \
