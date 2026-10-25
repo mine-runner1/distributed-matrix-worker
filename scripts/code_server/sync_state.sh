@@ -33,6 +33,13 @@ if [ ${#TARGETS_TO_PACK[@]} -eq 0 ]; then
   exit 0
 fi
 
+# Guard: Never overwrite cloud state with an empty workspace
+WORKSPACE_FILES=$(find "$WORKSPACE_DIR" -mindepth 1 2>/dev/null | wc -l || echo 0)
+if [ "$WORKSPACE_FILES" -eq 0 ]; then
+  echo "[SYNC] Guard Triggered: Workspace is completely empty. Skipping state upload to prevent blank overwrites."
+  exit 0
+fi
+
 if command -v pigz >/dev/null 2>&1; then
   tar -cpf - -C /home/runner --warning=no-file-changed "${TARGETS_TO_PACK[@]}" | pigz -p 4 -1 > "$LOCAL_ARCHIVE"
 else
