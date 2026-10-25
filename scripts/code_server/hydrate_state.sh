@@ -20,22 +20,32 @@ sudo chown -R runner:docker "$WORKSPACE_DIR" "$CLAUDE_DIR" /home/runner/.config 
 
 # 1. Check for dedicated Code-Server State Archive first
 echo "[HYDRATE] Checking for existing code_server_bundle.tar.gz on cloud storage..."
+CODE_SERVER_ARCHIVE_VALID=false
 if rclone check "$STORAGE_TARGET/code_server_bundle.tar.gz" "$STAGE_DIR" --one-way 2>/dev/null || rclone ls "$STORAGE_TARGET/code_server_bundle.tar.gz" >/dev/null 2>&1; then
-  echo "[HYDRATE] Found active code_server_bundle.tar.gz. Downloading..."
+  echo "[HYDRATE] Found code_server_bundle.tar.gz. Downloading..."
   rclone copyto "$STORAGE_TARGET/code_server_bundle.tar.gz" "$STAGE_DIR/code_server_bundle.tar.gz" \
     --drive-chunk-size=256M --buffer-size=64M --retries=5 --timeout=3m
 
-  echo "[HYDRATE] Extracting full workspace, .claude chats, and environment configs..."
-  if command -v pigz >/dev/null 2>&1; then
-    pigz -dc "$STAGE_DIR/code_server_bundle.tar.gz" | tar -xpf - -C /home/runner
+  # Check if archive actually has workspace files (more than 15 entries)
+  ENTRY_COUNT=$(tar -tzf "$STAGE_DIR/code_server_bundle.tar.gz" 2>/dev/null | wc -l || echo 0)
+  echo "[HYDRATE] Archive entries count: $ENTRY_COUNT"
+  if [ "$ENTRY_COUNT" -gt 15 ]; then
+    echo "[HYDRATE] Extracting full workspace, .claude chats, and environment configs..."
+    if command -v pigz >/dev/null 2>&1; then
+      pigz -dc "$STAGE_DIR/code_server_bundle.tar.gz" | tar -xpf - -C /home/runner
+    else
+      tar -xzpf "$STAGE_DIR/code_server_bundle.tar.gz" -C /home/runner
+    fi
+    CODE_SERVER_ARCHIVE_VALID=true
+    echo "[HYDRATE] Native code-server state restored successfully!"
   else
-    tar -xzpf "$STAGE_DIR/code_server_bundle.tar.gz" -C /home/runner
+    echo "[HYDRATE] Notice: code_server_bundle.tar.gz is empty or incomplete ($ENTRY_COUNT entries). Falling back to volumes_bundle.tar.gz!"
   fi
-  echo "[HYDRATE] Native code-server state restored successfully!"
+fi
 
 # 2. Migration Path: Extract from legacy Coolify Docker volumes bundle
-elif rclone ls "$LEGACY_VOLUMES_TARGET" >/dev/null 2>&1; then
-  echo "[HYDRATE] First boot migration: Found legacy volumes_bundle.tar.gz from Coolify. Downloading..."
+if [ "$CODE_SERVER_ARCHIVE_VALID" != "true" ] && (rclone ls "$LEGACY_VOLUMES_TARGET" >/dev/null 2>&1); then
+  echo "[HYDRATE] Downloading legacy volumes_bundle.tar.gz from Coolify backup..."
   rclone copyto "$LEGACY_VOLUMES_TARGET" "$STAGE_DIR/volumes_bundle.tar.gz" \
     --drive-chunk-size=256M --buffer-size=64M --retries=5 --timeout=3m
 
@@ -48,37 +58,39 @@ elif rclone ls "$LEGACY_VOLUMES_TARGET" >/dev/null 2>&1; then
     tar -xzpf "$STAGE_DIR/volumes_bundle.tar.gz" -C "$MIGRATE_TEMP" 2>/dev/null || true
   fi
 
-  # Search for code-server volume contents across extracted volumes
-  echo "[HYDRATE] Locating code-server files in extracted volumes..."
-  FOUND_CONFIG=$(find "$MIGRATE_TEMP" -type d \( -name ".claude" -o -name "code-server" -o -name "workspace" \) 2>/dev/null | head -n 1 || true)
+  # Deep search across all extracted volumes for files
+  echo "[HYDRATE] Scanning extracted volumes for Claude sessions, configs, and projects..."
 
-  if [ -n "$FOUND_CONFIG" ]; then
-    ROOT_CONTAINER_DIR=$(dirname "$FOUND_CONFIG")
-    echo "[HYDRATE] Detected container root at $ROOT_CONTAINER_DIR. Migrating..."
+  # 1. Restore Claude sessions
+  find "$MIGRATE_TEMP" -type d -name ".claude" 2>/dev/null | while read -r cdir; do
+    echo "[HYDRATE] Found Claude history at $cdir. Restoring..."
+    cp -rn "$cdir/." "$CLAUDE_DIR/" 2>/dev/null || true
+  done
 
-    # Restore .claude chats and settings if present
-    if [ -d "$ROOT_CONTAINER_DIR/.claude" ]; then
-      echo "[HYDRATE] Restoring Claude Code history and sessions..."
-      cp -a "$ROOT_CONTAINER_DIR/.claude/." "$CLAUDE_DIR/" 2>/dev/null || true
-    fi
-    [ -f "$ROOT_CONTAINER_DIR/.claude.json" ] && cp -a "$ROOT_CONTAINER_DIR/.claude.json" "/home/runner/" 2>/dev/null || true
+  # 2. Restore any .claude.json
+  find "$MIGRATE_TEMP" -name ".claude.json" -exec cp -n {} /home/runner/ \; 2>/dev/null || true
 
-    # Restore workspace projects
-    if [ -d "$ROOT_CONTAINER_DIR/workspace" ]; then
-      echo "[HYDRATE] Restoring workspace projects..."
-      cp -a "$ROOT_CONTAINER_DIR/workspace/." "$WORKSPACE_DIR/" 2>/dev/null || true
-    elif [ -d "$ROOT_CONTAINER_DIR/project" ]; then
-      cp -a "$ROOT_CONTAINER_DIR/project/." "$WORKSPACE_DIR/" 2>/dev/null || true
-    fi
+  # 3. Restore all project directories, python scripts, bots, and shell files
+  find "$MIGRATE_TEMP" -type d \( -name "workspace" -o -name "project" -o -name "projects" \) 2>/dev/null | while read -r wdir; do
+    echo "[HYDRATE] Found workspace at $wdir. Restoring to $WORKSPACE_DIR..."
+    cp -rn "$wdir/." "$WORKSPACE_DIR/" 2>/dev/null || true
+  done
 
-    # Restore any setup scripts in root
-    find "$ROOT_CONTAINER_DIR" -maxdepth 2 -type f -name "*.sh" -exec cp -a {} "$WORKSPACE_DIR/" \; 2>/dev/null || true
-  else
-    echo "[HYDRATE] Notice: No direct code-server volume found in legacy tarball. Defaulting to fresh workspace."
-  fi
+  # 4. Extract any sub-folders that look like user projects
+  find "$MIGRATE_TEMP" -mindepth 2 -maxdepth 4 -type d \( -name "*bot*" -o -name "*grabber*" -o -name "*Vault*" -o -name "startup_scripts*" -o -name "*manga*" -o -name "*tts*" \) 2>/dev/null | while read -r pdir; do
+    echo "[HYDRATE] Found project folder $(basename "$pdir"). Restoring..."
+    cp -rn "$pdir" "$WORKSPACE_DIR/" 2>/dev/null || true
+  done
+
+  # 5. Extract all startup scripts
+  find "$MIGRATE_TEMP" -maxdepth 5 -type f -name "*.sh" 2>/dev/null | while read -r sfile; do
+    cp -n "$sfile" "$WORKSPACE_DIR/" 2>/dev/null || true
+  done
+
   rm -rf "$MIGRATE_TEMP"
 fi
 
 # 3. Ensure permissions and directories are clean
 sudo chown -R runner:docker "$WORKSPACE_DIR" "$CLAUDE_DIR" /home/runner/.config /home/runner/.local 2>/dev/null || true
-echo "[HYDRATE] Hydration complete. Workspace ready at $WORKSPACE_DIR."
+RESTORED_COUNT=$(find "$WORKSPACE_DIR" -mindepth 1 2>/dev/null | wc -l || echo 0)
+echo "[HYDRATE] Hydration complete. $RESTORED_COUNT files available in $WORKSPACE_DIR."
