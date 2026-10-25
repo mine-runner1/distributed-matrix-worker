@@ -98,27 +98,34 @@ jobs:
           # Configure code-server password authentication
           mkdir -p ~/.config/code-server
           PASS="${WEB_PASSWORD:-silverxcode2026}"
-          cat << EOF > ~/.config/code-server/config.yaml
-          bind-addr: 0.0.0.0:8080
-          auth: password
-          password: $PASS
-          cert: false
-          EOF
+          cat << 'EOF' > ~/.config/code-server/config.yaml
+bind-addr: 0.0.0.0:8080
+auth: password
+password: REPLACE_PASS
+cert: false
+EOF
+          sed -i "s/REPLACE_PASS/$PASS/g" ~/.config/code-server/config.yaml
+          export PASSWORD="$PASS"
 
           # Enable low-port binding for non-root node and bind 80 -> 8080
           sudo apt-get install -y -qq redir 2>/dev/null || true
           nohup sudo redir --laddr=0.0.0.0 --lport=80 --caddr=127.0.0.1 --cport=8080 >/dev/null 2>&1 &
 
-          # Launch code-server in background
+          # Launch code-server with explicit network and auth parameters
           echo "Starting standalone developer environment on port 8080 (bridged to port 80)..."
-          nohup code-server /home/runner/workspace > /tmp/code-server.log 2>&1 &
+          nohup code-server \
+            --bind-addr 0.0.0.0:8080 \
+            --auth password \
+            --disable-telemetry \
+            /home/runner/workspace > /tmp/code-server.log 2>&1 &
           sleep 4
 
           # Verify local health
           CS_ONLINE=false
           for i in {1..30}; do
-            if curl -fsS -o /dev/null --connect-timeout 2 http://127.0.0.1:8080; then
-              echo "SUCCESS: Code-server active on port 8080 ($((i*2))s)."
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 2 http://127.0.0.1:8080/login || echo "000")
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ]; then
+              echo "SUCCESS: Code-server active on port 8080 (HTTP ${HTTP_CODE} at $((i*2))s)."
               CS_ONLINE=true
               break
             fi
@@ -139,10 +146,10 @@ jobs:
             echo "Verifying public edge ingress endpoint..."
             CF_ONLINE=false
             for cf_chk in {1..30}; do
-              CF_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 3 https://code.silver-xf.bond || echo "000")
+              CF_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 3 https://code.silver-xf.bond/login || echo "000")
               echo "Public ingress check (${cf_chk}/30): HTTP ${CF_STATUS}"
-              if [ "$CF_STATUS" != "530" ] && [ "$CF_STATUS" != "000" ]; then
-                echo "SUCCESS: Ingress is publicly active (HTTP ${CF_STATUS})!"
+              if [ "$CF_STATUS" = "200" ] || [ "$CF_STATUS" = "302" ]; then
+                echo "SUCCESS: Ingress is publicly active and healthy (HTTP ${CF_STATUS})!"
                 CF_ONLINE=true
                 break
               fi
