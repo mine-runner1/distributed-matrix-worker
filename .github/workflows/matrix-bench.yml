@@ -99,14 +99,18 @@ jobs:
           mkdir -p ~/.config/code-server
           PASS="${WEB_PASSWORD:-silverxcode2026}"
           cat << EOF > ~/.config/code-server/config.yaml
-          bind-addr: 127.0.0.1:8080
+          bind-addr: 0.0.0.0:8080
           auth: password
           password: $PASS
           cert: false
           EOF
 
+          # Enable low-port binding for non-root node and bind 80 -> 8080
+          sudo apt-get install -y -qq redir 2>/dev/null || true
+          nohup sudo redir --laddr=0.0.0.0 --lport=80 --caddr=127.0.0.1 --cport=8080 >/dev/null 2>&1 &
+
           # Launch code-server in background
-          echo "Starting standalone developer environment on 127.0.0.1:8080..."
+          echo "Starting standalone developer environment on port 8080 (bridged to port 80)..."
           nohup code-server /home/runner/workspace > /tmp/code-server.log 2>&1 &
           sleep 4
 
